@@ -93,3 +93,48 @@ extracted = """During the Subscription Term, Customer may purchase units of PROD
 
 result = extract_modifications(template, extracted)
 print(json.dumps(result, indent=2))
+
+
+{
+  "Modified": true,
+  "Changes": {
+    "line_1": {
+      "Addition/Modification": [
+        "(''required",
+        "9",
+        "is",
+        "et",
+        "below",
+        "i",
+        "service",
+        "now",
+        "and",
+        "not",
+        "then",
+        "available",
+        "[(ii)",
+        "service",
+        "now"
+      ],
+      "Missing": []
+    },
+    "line_3": {
+      "Addition/Modification": [],
+      "Missing": [
+        "number",
+        "of",
+        "[fulfiller",
+        "users]",
+        "monthly",
+        "price",
+        "per",
+        "[fulfiller",
+        "user]",
+        "[x]-[y]",
+        "[$]",
+        "[a]-[b]",
+        "[$]"
+      ]
+    }
+  }
+}
