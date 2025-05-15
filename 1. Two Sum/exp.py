@@ -19,6 +19,11 @@ def cleaning_extracted_text(sentence):
     text = re.sub(r"[\[\]\(\)]", '', text)
     text = re.sub(r"\s+", ' ', text).strip()
     text = text.rstrip('.;')
+   
+    text = re.sub(r"\bservice\s+now\b", "servicenow", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bservicenow['’]s\b", "servicenow", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bservicenow[-_]\b", "servicenow", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bservicenow\b", "servicenow", text, flags=re.IGNORECASE)
     return text.lower()
 
 
