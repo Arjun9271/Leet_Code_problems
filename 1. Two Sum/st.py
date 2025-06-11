@@ -1,53 +1,64 @@
-# app.py
+
 
 import os
 from pathlib import Path
 import streamlit as st
 from tempfile import mkdtemp
-from dotenv import load_dotenv
+import json
 
-import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw
+from dotenv import load_dotenv
+from PIL import ImageDraw
 
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_docling.loader import ExportType
 from langchain_docling import DoclingLoader
 from langchain_huggingface import HuggingFaceEndpoint
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_milvus import Milvus
 
-from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.chunking import HybridChunker, DocMeta
 from docling.datamodel.document import DoclingDocument
+from langchain_docling.loader import ExportType
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 0) CONFIG
-# ──────────────────────────────────────────────────────────────────────────────
-load_dotenv()
-HF_TOKEN       = os.getenv("HF_TOKEN", "")
+
+
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Environment variables
+HF_TOKEN = '"
 EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
-GEN_MODEL_ID   = "mistralai/Mixtral-8x7B-Instruct-v0.1"
-PROMPT         = PromptTemplate.from_template(
-    "Context information is below.\n"
-    "---------------------\n"
-    "{context}\n"
-    "---------------------\n"
-    "Given the context information and not prior knowledge, answer the query.\n"
-    "Query: {input}\n"
-    "Answer:\n",
-)
-TOP_K       = 3
-MILVUS_DIR  = str(Path(mkdtemp()) / "docling.db")
+GEN_MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
 
-# Put your documents here (URLs or local paths)
-SOURCES = st.sidebar.text_area(
-    "Document URLs/paths (one per line)",
-    value="https://arxiv.org/pdf/2408.09869"
-).splitlines()
+
+PROMPT = PromptTemplate.from_template(
+    'context information is below.\ngiven the context information and not the prior knowledge ,answer the query.\nquery:{input}\nAnswer:\n'
+)
+
+TOP_K = 3
+MILVUS_DIR = str(Path(mkdtemp()) / "docling.db")
+
+
+uploaded_files = st.sidebar.file_uploader(
+    'upload the pdf documents',
+    type = ['pdf'],
+    accept_multiple_files = True
+
+)
+
+SOURCES = []
+if uploaded_files:
+    tempdir = Path(mkdtemp())
+    for file in uploaded_files:
+        path = tempdir/file.name
+        with open(path,'wb') as f:
+            f.write(file.read())
+        SOURCES.append(str(path))
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) BUILD OR LOAD INDEX ONCE
@@ -183,3 +194,5 @@ with viz_col:
             with nxt:
                 if st.button("Next ▶️"):
                     st.session_state.img_idx = min(len(imgs)-1, st.session_state.img_idx + 1)
+
+
