@@ -51,6 +51,36 @@ def get_diff_context(text1: str, text2: str) -> str:
         if opcode in ("insert", "replace", "delete"):
             diffs.append(" ".join(text2.splitlines()[j1:j2]))
     return "\n".join(diffs)
+def get_diff_context(text1: str, text2: str) -> str:
+    dmp = diff_match_patch()
+    diffs = dmp.diff_main(text1, text2)
+    dmp.diff_cleanupSemantic(diffs)
+
+    removed = []
+    added = []
+    modified = []
+
+    i = 0
+    while i < len(diffs):
+        if i < len(diffs) - 1 and diffs[i][0] == -1 and diffs[i+1][0] == 1:
+            modified.append(f"'{diffs[i][1]}' → '{diffs[i+1][1]}'")
+            i += 2
+        else:
+            if diffs[i][0] == -1:
+                removed.append(diffs[i][1])
+            elif diffs[i][0] == 1:
+                added.append(diffs[i][1])
+            i += 1
+
+    diff_text = ""
+    if modified:
+        diff_text += "Modified:\n" + "\n".join(modified) + "\n\n"
+    if removed:
+        diff_text += "Removed:\n" + "\n".join(removed) + "\n\n"
+    if added:
+        diff_text += "Added:\n" + "\n".join(added)
+
+    return diff_text.strip()
 ##########################
 #fastapi
 ###########################
