@@ -1,23 +1,24 @@
 
 
 import fitz
-import torch
 import json
 from datetime import datetime
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+from transformers import AutoTokenizer, AutoProcessor, AutoModelForVision2Seq
 
-# ✅ Correct model and tokenizer loading for TEXT mode
-model_id = "numind/NuExtract-2.0-8B"
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
+# Load model and processor
+model_id = "numind/NuExtract-2.0-2B"  # or -8B if your GPU supports it
+processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+model = AutoModelForVision2Seq.from_pretrained(
     model_id,
-    trust_remote_code=True,
     torch_dtype=torch.bfloat16,
-    device_map="auto"
+    attn_implementation="flash_attention_2",  # Optional, improves performance
+    device_map="auto",
+    trust_remote_code=True
 )
 model.eval()
 
-# ✅ Schema template using NuMind style
+# Contract field schema
 template = {
     "title": "string",
     "effective_date": "date-time",
@@ -33,28 +34,47 @@ template = {
     }
 }
 
-# ✅ Extract plain text from PDF
+# Extract plain text from PDF
 def extract_text(pdf_path):
     doc = fitz.open(pdf_path)
     return "\n".join(page.get_text() for page in doc)
 
-# ✅ Token-level chunking
-def chunk_text(text, max_tokens=1500):
+# Token-aware chunking
+def chunk_text(text, tokenizer, max_tokens=1500):
     tokens = tokenizer.encode(text)
     return [tokenizer.decode(tokens[i:i+max_tokens]) for i in range(0, len(tokens), max_tokens)]
 
-# ✅ Run NuExtract model on each chunk
-def extract_chunk(text_chunk):
-    prompt = {
-        "template": template,
-        "input": text_chunk
-    }
-    inputs = tokenizer(json.dumps(prompt), return_tensors="pt", truncation=True, max_length=4096).to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=512, temperature=0)
-    decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return json.loads(decoded)
+# Format input using chat_template
+def format_prompt(text_chunk, processor, template):
+    messages = [{"role": "user", "content": text_chunk}]
+    return processor.tokenizer.apply_chat_template(
+        messages,
+        template=template,
+        tokenize=False,
+        add_generation_prompt=True
+    )
 
-# ✅ Merge outputs from all chunks
+# Inference per chunk
+def extract_chunk(text_chunk):
+    prompt = format_prompt(text_chunk, processor, template)
+    inputs = processor(text=[prompt], return_tensors="pt", padding=True).to(model.device)
+
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=1024,
+        do_sample=False,
+        num_beams=1
+    )
+
+    response = processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+    try:
+        return json.loads(response)
+    except:
+        print("⚠️ Warning: Failed to parse JSON from response:")
+        print(response)
+        return {}
+
+# Merge chunk outputs
 def merge_results(results):
     final = {
         **template,
@@ -72,7 +92,7 @@ def merge_results(results):
                     final[k] = final.get(k) or v
     return final
 
-# ✅ Auto-calculate duration from dates
+# Duration calculator
 def calculate_duration(start, end):
     try:
         d1 = datetime.fromisoformat(start)
@@ -82,18 +102,21 @@ def calculate_duration(start, end):
     except:
         return None
 
-# ✅ Final pipeline
+# Final pipeline
 def extract_contract(pdf_path):
     text = extract_text(pdf_path)
-    chunks = chunk_text(text)
-    outputs = [extract_chunk(c) for c in chunks]
-    merged = merge_results(outputs)
+    chunks = chunk_text(text, processor.tokenizer)
+    extracted = [extract_chunk(c) for c in chunks]
+    merged = merge_results(extracted)
+
     if not merged.get("duration") and merged.get("effective_date") and merged.get("expiry_date"):
-        dur = calculate_duration(merged["effective_date"], merged["expiry_date"])
-        if dur: merged["duration"] = dur
+        duration = calculate_duration(merged["effective_date"], merged["expiry_date"])
+        if duration:
+            merged["duration"] = duration
+
     return merged
 
-# 🔧 Example run
+# Run it
 if __name__ == "__main__":
-    result = extract_contract("your_contract.pdf")  # Replace with your PDF
+    result = extract_contract("your_contract.pdf")
     print(json.dumps(result, indent=2))
