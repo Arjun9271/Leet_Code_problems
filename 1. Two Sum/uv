@@ -1,75 +1,313 @@
-FIELD_QUERIES = {
-    "title": {
-        "query": "agreement title heading name at top e.g. 'Service Agreement with TechCorp Inc.'",
-        "instruction": (
-            "Return only the short title EXACTLY as it appears (e.g., 'Service Agreement with TechCorp Inc.'). "
-            "No quotes, no extra words. If unclear or not found, return \"\"."
-        )
-    },
-    "effective_date": {
-        "query": "effective date when agreement begins start date",
-        "instruction": (
-            "Return ONLY the effective date in YYYY-MM-DD. Convert month names if needed "
-            "(e.g., 'May 15, 2023' -> '2023-05-15'). If missing or ambiguous, return \"\"."
-        )
-    },
-    "expiry_date": {
-        "query": "expiry date end date term end termination date",
-        "instruction": (
-            "Return ONLY the expiry date in YYYY-MM-DD. Convert month names if needed. "
-            "If missing or ambiguous, return \"\"."
-        )
-    },
-    "contract_type": {
-        "query": "contract type e.g. Service Agreement Master Services Agreement Non Disclosure",
-        "instruction": (
-            "Return ONLY the contract type as 1 short phrase (max ~4 words), e.g., 'Service Agreement'. "
-            "No quotes. If not clearly stated, return \"\"."
-        )
-    },
-    "party_name": {
-        "query": "primary party name shown near effective expiry top right party name label",
-        "instruction": (
-            "Return ONLY the primary party/company name (the one shown under 'Party Name' or equivalent label). "
-            "No extra words, no quotes. If unclear or absent, return \"\"."
-        )
-    },
-    "parties": {
-        "query": "all parties involved parties section e.g. TechCorp Inc. ServicePro LLC between and",
-        "instruction": (
-            "Return ALL party names separated by commas in a single line (e.g., 'TechCorp Inc., ServicePro LLC'). "
-            "Do NOT include words like 'and', 'between', 'our company', or legal role text. "
-            "If no clear parties found, return \"\"."
-        )
-    },
-    # Nested
-    "key_terms_and_conditions": {
-        "financial": {
-            "payment_terms": {
-                "query": "payment terms financial monthly payments due invoice net days amount",
-                "instruction": (
-                    "Return a ONE-LINE payment term (e.g., 'Monthly payments of $50,000 due within 30 days of invoice date'). "
-                    "Trim to the core obligation: amount + frequency + due window. If not clearly stated, return \"\"."
-                )
-            }
-        },
-        "legal": {
-            "liability_cap": {
-                "query": "liability cap limitation of liability total liability limited fees",
-                "instruction": (
-                    "Return the liability cap in ONE short line (e.g., 'Total liability limited to 12 months of fees paid under this agreement'). "
-                    "If no clear cap, return \"\"."
-                )
-            }
-        },
-        "performance": {
-            "service_level_agreement": {
-                "query": "service level agreement SLA uptime guarantee penalties non compliance",
-                "instruction": (
-                    "Return the SLA in ONE concise line (e.g., '99.9% uptime guarantee with penalties for non-compliance'). "
-                    "If SLA not found, return \"\"."
-                )
-            }
+def get_pdf_filename_key(upload_file):
+    if hasattr(upload_file, 'filename'):
+        return os.path.splitext(os.path.basename(upload_file.filename))[0]
+    return "uploaded_pdf"
+
+def extract_and_cache(upload_file):
+    CACHE_DIR = "pdf_clause_cache"
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+    pdf_key = get_pdf_filename_key(upload_file)
+    cache_file = os.path.join(CACHE_DIR, f"{pdf_key}.csv")
+
+    if os.path.exists(cache_file):
+        log.info(f"Loaded cached clause data for PDF: {pdf_key}")
+        return pd.read_csv(cache_file)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        temp_pdf_path = tmp.name
+        shutil.copyfileobj(upload_file.file, tmp)
+
+    # Extract clauses
+    log.info(f"Extracting clauses for PDF: {temp_pdf_path}")
+    text = extract_text_from_pdf(temp_pdf_path)
+    clauses = extract_numbered_clauses(text)
+    df = pd.DataFrame(clauses, columns=["Clause_name", "Clause_content"])
+    df['Clause_name'] = df['Clause_name'].apply(clean_clause_name)
+
+    df.to_csv(cache_file, index=False)
+    log.info(f"Saved extracted clauses to cache for PDF: {pdf_key}")
+
+    os.remove(temp_pdf_path)
+
+    return df
+
+def extraction(std_pdf, agreement_pdf):
+    log.info("Starting extraction from PDFs with caching...")
+    std_df = extract_and_cache(std_pdf)
+    agreement_df = extract_and_cache(agreement_pdf)
+
+    std_df['clause_order'] = range(len(std_df))
+
+    log.info("Merging dataframes on Clause_name...")
+    merged_df = pd.merge(std_df, agreement_df, on="Clause_name", how="outer", suffixes=('_template', '_agreement'))
+
+    merged_df = merged_df.sort_values(by='clause_order').reset_index(drop=True)
+    merged_df.drop(columns=["clause_order"], inplace=True)
+    return merged_df
+
+def compare_clauses_diff(text1: str, text2: str) -> dict: 
+    '''categorized the differences'''
+    words1 = text1.split()
+    words2 = text2.split()
+    lower_words1 = [w.lower() for w in words1]
+    lower_words2 = [w.lower() for w in words2]
+
+    if lower_words1 == lower_words2:
+        return {
+            "add_in": [],
+            "omit": [],
+            "substitute": []
         }
+
+    sm = difflib.SequenceMatcher(None, lower_words1, lower_words2)
+
+    categorized_diff = {
+        "add_in": [],
+        "omit": [],
+        "substitute": []
     }
-}
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            continue
+        elif tag == 'insert':
+            categorized_diff["add_in"].append({
+                "position": j1,
+                "text": ' '.join(words2[j1:j2])
+            })
+        elif tag == 'delete':
+            categorized_diff["omit"].append({
+                "position": i1,
+                "text": ' '.join(words1[i1:i2])
+            })
+        elif tag == 'replace':
+            categorized_diff["substitute"].append({
+                "position_old": i1,
+                "position_new": j1,
+                "old_text": ' '.join(words1[i1:i2]),
+                "new_text": ' '.join(words2[j1:j2])
+            })
+
+    return categorized_diff
+
+def wrap_unspanned_text(html_text, default_class="default-text", default_style=None):
+    """
+    Step-by-step approach:
+    1. Find all span positions
+    2. Wrap text from index 0 to first span (if exists)
+    3. Wrap text between span tags
+    4. Wrap text after last span to end
+    """
+    
+    # Create span attributes
+    span_attrs = f'class="{default_class}"'
+    if default_style:
+        span_attrs += f' style="{default_style}"'
+    
+    # Step 1: Find all span positions
+    spans = []
+    pattern = r'<span[^>]>.?</span>'
+    
+    for match in re.finditer(pattern, html_text, re.DOTALL | re.IGNORECASE):
+        spans.append((match.start(), match.end(), match.group()))
+    
+    if not spans:
+        # No spans found, wrap entire text
+        return f'<span {span_attrs}>{html_text}</span>'
+    
+    result_parts = []
+    current_pos = 0
+    
+    for i, (start_pos, end_pos, span_content) in enumerate(spans):
+        # Step 2 & 3: Check if there's text before this span
+        if current_pos < start_pos:
+            text_before = html_text[current_pos:start_pos]
+            if text_before.strip():  # Only wrap non-empty text
+                result_parts.append(f'<span {span_attrs}>{text_before}</span>')
+            else:
+                result_parts.append(text_before)  # Keep whitespace as is
+        
+        # Add the existing span
+        result_parts.append(span_content)
+        current_pos = end_pos
+    
+    # Step 4: Check if there's text after the last span
+    if current_pos < len(html_text):
+        text_after = html_text[current_pos:]
+        if text_after.strip():  # Only wrap non-empty text
+            result_parts.append(f'<span {span_attrs}>{text_after}</span>')
+        else:
+            result_parts.append(text_after)  # Keep whitespace as is
+    
+    return ''.join(result_parts)
+
+def summarize_clause(text: str) -> str:
+    return text
+def is_valid_clause(text: str) -> bool:
+    return bool(text and str(text).strip().lower() not in ["", "nan", "none", "null"])
+def compare_clauses_diff_colour(text1: str, text2: str) -> str: 
+    words1 = text1.split()
+    words2 = text2.split()
+
+    lower_words1 = [w.lower() for w in words1]
+    lower_words2 = [w.lower() for w in words2]
+
+    if lower_words1 == lower_words2:
+        return wrap_unspanned_text(" ".join(words2))
+
+    sm = difflib.SequenceMatcher(None, lower_words1, lower_words2)
+    result = []
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            result.extend(words2[j1:j2])  
+        elif tag == 'insert':
+            inserted = ' '.join(words2[j1:j2])
+            result.append(f"<span style='color:blue'>+{escape(inserted)}</span>")
+        elif tag == 'delete':
+            deleted = ' '.join(words1[i1:i2])
+            result.append(f"<span style='color:red'>-{escape(deleted)}</span>")
+        elif tag == 'replace':
+            deleted = ' '.join(words1[i1:i2])
+            inserted = ' '.join(words2[j1:j2])
+            result.append(f"<span style='color:red'>-{escape(deleted)}</span>")
+            result.append(f"<span style='color:blue'>+{escape(inserted)}</span>")
+
+    # return ' '.join(result)
+    raw_html = ' '.join(result)
+    return wrap_unspanned_text(raw_html)
+    
+def process_clause_comparison_df(df: pd.DataFrame, output_path: str) -> None:
+    content_cols = [col for col in df.columns if 'Clause_content' in col]
+    if len(content_cols) < 1:
+        raise ValueError("No clause content columns found.")
+    elif len(content_cols) == 1:
+        col1 = content_cols[0]
+        col2 = None
+    else:
+        col1, col2 = content_cols[:2]
+
+    html_diffs = []
+    summaries = []
+
+    for index, row in df.iterrows():
+        clause = row.get("Clause_name", f"Clause_{index + 1}")
+        content_1 = str(row.get(col1, "")).strip()
+        content_2 = str(row.get(col2, "")).strip() if col2 else ""
+
+        is_valid_1 = is_valid_clause(content_1)
+        is_valid_2 = is_valid_clause(content_2)
+
+        if is_valid_1 and is_valid_2:
+            html_diff = compare_clauses_diff_colour(content_1, content_2)
+        elif is_valid_1:
+            html_diff = summarize_clause(content_1)
+        elif is_valid_2:
+            html_diff = summarize_clause(content_2)
+        else:
+            html_diff = "No valid clause content available."
+
+        html_diffs.append(html_diff)
+
+        summaries.append(row.get("Summary", "No summary available."))
+
+    # df["Comparison_Result"] = html_diffs
+    # df["Summary"] = summaries
+    if "Comparison_Result" not in df.columns:
+        df["Comparison_Result"] = html_diffs
+
+    # if "Summary" not in df.columns:
+    #     df["Summary"] = summaries
+
+    if "RiskAssessmentLLM" in df.columns:
+        df.drop(columns=["RiskAssessmentLLM"], inplace=True)
+
+    def apply_styles(styler: Styler) -> Styler:
+        table_styles = [
+            {'selector': 'th', 'props': [('text-align', 'left'), ('vertical-align', 'top'), ('border', '1px solid black')]},
+            {'selector': 'td', 'props': [('text-align', 'left'), ('vertical-align', 'top'),
+                                         ('word-wrap', 'break-word'), ('white-space', 'normal'),
+                                         ('border', '1px solid black')]},
+            {'selector': 'table', 'props': [('table-layout', 'fixed'), ('width', '100%'),
+                                            ('border-collapse', 'collapse'), ('border', '2px solid black')]}
+        ]
+
+        column_styles = []
+        if col1:
+            column_styles.append({'selector': f'td.col{df.columns.get_loc(col1)}', 'props': [('width', '25%')]})
+        if col2:
+            column_styles.append({'selector': f'td.col{df.columns.get_loc(col2)}', 'props': [('width', '25%')]})
+        column_styles.extend([ 
+            {'selector': f'td.col{df.columns.get_loc("Clause_content_agreement")}', 'props': [('width', '25%')]},
+            {'selector': f'td.col{df.columns.get_loc("Comparison_Result")}', 'props': [('width', '25%')]},
+            # {'selector': f'td.col{df.columns.get_loc("Summary")}', 'props': [('width', '25%')]},
+            # {'selector': f'td.col{df.columns.get_loc("Changes_Summary")}', 'props': [('width', '25%')]}
+        ])
+
+        return styler.set_table_styles(table_styles + column_styles)
+
+    styled = df.style.hide(axis="index").pipe(apply_styles)
+    html_output = styled.to_html(escape=False, index=False)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html_output)
+
+    log.info(f"\n Output saved to: {output_path}")
+    return df
+    
+def comparison_diff_summary(std_pdf, agreement_pdf):
+    merged_df = extraction(std_pdf, agreement_pdf)
+
+    results = []
+    for index, row in merged_df.iterrows():
+        clause_name = row['Clause_name']
+        template_text = str(row.get('Clause_content_template', '')).strip()
+        agreement_text = str(row.get('Clause_content_agreement', '')).strip()
+        # comparison_result = row.get('Comparison_Result', '')
+
+        comparison_result = compare_clauses_diff_colour(template_text, agreement_text)
+        merged_df.loc[index, 'Comparison_Result'] = comparison_result
+
+        
+        # if "span style" in comparison_result:
+        #     diff_summary = call_llm_summary_from_diff(comparison_result)
+        # else:
+        #     diff_summary = "No substantive changes."
+        
+        diffs = compare_clauses_diff(template_text, agreement_text)
+
+        # if diffs != []:
+        #     upd_diff_summary = call_llm_summary_using_diffs(diffs)
+        #     print("llm output of diffs summary")
+        #     print(upd_diff_summary)
+        # else:
+        #     upd_diff_summary = "No substantive changes."
+
+        # merged_df.loc[index, 'Summary'] = f"{diff_summary}"
+        # merged_df.loc[index, 'Changes_Summary'] = f"{upd_diff_summary}"
+        results.append({
+            "clause_name": clause_name,
+            "template_text": template_text,
+            "agreement_text": agreement_text,
+            "differences": diffs,
+            "comparison_result": comparison_result,
+            # "changes_summary": upd_diff_summary
+            # "diff_summary": diff_summary
+        })
+
+    static_dir = "static"
+    os.makedirs(static_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    html_filename = f"clause_analysis_{timestamp}.html"
+    html_path = os.path.join(static_dir, html_filename)
+
+    log.info("Generating comparison results and summaries...")
+    process_clause_comparison_df(merged_df, html_path)
+
+    # base_url = os.getenv("BASE_URL", "http://localhost:8000")
+    diff_doc = f"/extapi/static/{html_filename}"
+    log.info(f"HTML report available at: {diff_doc}")
+
+    return results, diff_doc
