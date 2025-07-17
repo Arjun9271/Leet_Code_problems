@@ -1,2 +1,75 @@
-uv
-https://claude.ai/public/artifacts/3d17427d-1edb-4750-9201-6b8e73ae6ad7
+FIELD_QUERIES = {
+    "title": {
+        "query": "agreement title heading name at top e.g. 'Service Agreement with TechCorp Inc.'",
+        "instruction": (
+            "Return only the short title EXACTLY as it appears (e.g., 'Service Agreement with TechCorp Inc.'). "
+            "No quotes, no extra words. If unclear or not found, return \"\"."
+        )
+    },
+    "effective_date": {
+        "query": "effective date when agreement begins start date",
+        "instruction": (
+            "Return ONLY the effective date in YYYY-MM-DD. Convert month names if needed "
+            "(e.g., 'May 15, 2023' -> '2023-05-15'). If missing or ambiguous, return \"\"."
+        )
+    },
+    "expiry_date": {
+        "query": "expiry date end date term end termination date",
+        "instruction": (
+            "Return ONLY the expiry date in YYYY-MM-DD. Convert month names if needed. "
+            "If missing or ambiguous, return \"\"."
+        )
+    },
+    "contract_type": {
+        "query": "contract type e.g. Service Agreement Master Services Agreement Non Disclosure",
+        "instruction": (
+            "Return ONLY the contract type as 1 short phrase (max ~4 words), e.g., 'Service Agreement'. "
+            "No quotes. If not clearly stated, return \"\"."
+        )
+    },
+    "party_name": {
+        "query": "primary party name shown near effective expiry top right party name label",
+        "instruction": (
+            "Return ONLY the primary party/company name (the one shown under 'Party Name' or equivalent label). "
+            "No extra words, no quotes. If unclear or absent, return \"\"."
+        )
+    },
+    "parties": {
+        "query": "all parties involved parties section e.g. TechCorp Inc. ServicePro LLC between and",
+        "instruction": (
+            "Return ALL party names separated by commas in a single line (e.g., 'TechCorp Inc., ServicePro LLC'). "
+            "Do NOT include words like 'and', 'between', 'our company', or legal role text. "
+            "If no clear parties found, return \"\"."
+        )
+    },
+    # Nested
+    "key_terms_and_conditions": {
+        "financial": {
+            "payment_terms": {
+                "query": "payment terms financial monthly payments due invoice net days amount",
+                "instruction": (
+                    "Return a ONE-LINE payment term (e.g., 'Monthly payments of $50,000 due within 30 days of invoice date'). "
+                    "Trim to the core obligation: amount + frequency + due window. If not clearly stated, return \"\"."
+                )
+            }
+        },
+        "legal": {
+            "liability_cap": {
+                "query": "liability cap limitation of liability total liability limited fees",
+                "instruction": (
+                    "Return the liability cap in ONE short line (e.g., 'Total liability limited to 12 months of fees paid under this agreement'). "
+                    "If no clear cap, return \"\"."
+                )
+            }
+        },
+        "performance": {
+            "service_level_agreement": {
+                "query": "service level agreement SLA uptime guarantee penalties non compliance",
+                "instruction": (
+                    "Return the SLA in ONE concise line (e.g., '99.9% uptime guarantee with penalties for non-compliance'). "
+                    "If SLA not found, return \"\"."
+                )
+            }
+        }
+    }
+}
