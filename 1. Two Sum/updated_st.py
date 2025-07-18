@@ -1,52 +1,41 @@
 import pdfplumber
 import pandas as pd
+import re
 
-def extract_sections_from_pdf(pdf_path: str, output_csv: str):
-    """
-    Extracts preamble and sections (heading + paragraphs) from a PDF and saves to CSV.
-    """
-    all_elements = []
-    
+def extract_sections_fallback(pdf_path, output_csv):
     with pdfplumber.open(pdf_path) as pdf:
+        full_text = ""
         for page in pdf.pages:
-            words = page.extract_words(extra_attrs=["size", "fontname", "x0", "top"])
-            for w in words:
-                all_elements.append(w)
+            full_text += page.extract_text() + "\n"
 
-    # Sort by y-coordinate (top) and then x-coordinate for reading order
-    all_elements.sort(key=lambda x: (x["top"], x["x0"]))
-
+    # Split into lines
+    lines = full_text.split("\n")
+    
     sections = []
     current_heading = "Document Preamble"
     current_content = []
 
-    # Detect heading threshold: find avg font size
-    font_sizes = [float(w["size"]) for w in all_elements]
-    avg_font_size = sum(font_sizes) / len(font_sizes)
-    heading_threshold = avg_font_size + 1  # anything bigger than avg is considered heading
+    heading_pattern = re.compile(r'^[A-Z\s\-:&()0-9]+$')  # ALL CAPS lines
+    keywords = ["EXHIBIT", "SERVICES", "TERMS", "AGREEMENT", "PAYMENT", "NON-CIRCUMVENTION", "NON-SOLICITATION"]
 
-    for word in all_elements:
-        text = word["text"].strip()
-        font_size = float(word["size"])
-        
-        if font_size >= heading_threshold or text.isupper():
+    for line in lines:
+        clean_line = line.strip()
+        if not clean_line:
+            continue
+
+        # Check if heading
+        if heading_pattern.match(clean_line) or clean_line.endswith(":") or any(k in clean_line for k in keywords):
             # Save previous section
             if current_content:
-                sections.append({
-                    "Heading": current_heading,
-                    "Paragraph": " ".join(current_content).strip()
-                })
+                sections.append({"Heading": current_heading, "Paragraph": " ".join(current_content).strip()})
                 current_content = []
-            current_heading = text  # new heading
+            current_heading = clean_line
         else:
-            current_content.append(text)
+            current_content.append(clean_line)
 
-    # Add last section
+    # Save last section
     if current_content:
-        sections.append({
-            "Heading": current_heading,
-            "Paragraph": " ".join(current_content).strip()
-        })
+        sections.append({"Heading": current_heading, "Paragraph": " ".join(current_content).strip()})
 
     # Save to CSV
     df = pd.DataFrame(sections)
@@ -54,4 +43,4 @@ def extract_sections_from_pdf(pdf_path: str, output_csv: str):
     print(f"✅ Extracted {len(sections)} sections into {output_csv}")
 
 # Example usage
-extract_sections_from_pdf("Old_MSA.pdf", "sections_extracted.csv")
+extract_sections_fallback("Exhibit_B.pdf", "exhibit_sections.csv")
