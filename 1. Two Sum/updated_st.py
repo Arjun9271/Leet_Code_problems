@@ -1,80 +1,57 @@
 import pdfplumber
-import re
 import pandas as pd
-from typing import List, Dict
 
-
-# ---------- STEP 1: Load PDF and extract text ----------
-def load_pdf_text(file_path: str) -> str:
-    """Extract text from a PDF file using pdfplumber."""
-    text = ""
-    with pdfplumber.open(file_path) as pdf:
+def extract_sections_from_pdf(pdf_path: str, output_csv: str):
+    """
+    Extracts preamble and sections (heading + paragraphs) from a PDF and saves to CSV.
+    """
+    all_elements = []
+    
+    with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text += page.extract_text() + "\n"
-    return text.strip()
+            words = page.extract_words(extra_attrs=["size", "fontname", "x0", "top"])
+            for w in words:
+                all_elements.append(w)
 
+    # Sort by y-coordinate (top) and then x-coordinate for reading order
+    all_elements.sort(key=lambda x: (x["top"], x["x0"]))
 
-# ---------- STEP 2: Normalize PDF text ----------
-def normalize_text(text: str) -> str:
-    """Clean up extracted text for easier parsing."""
-    text = text.replace("–", "-").replace("—", "-")  # normalize dashes
-    text = re.sub(r'[ \t]+', ' ', text)  # collapse extra spaces
-    return text.strip()
-
-
-# ---------- STEP 3: Extract sections ----------
-def extract_sections(text: str) -> List[Dict[str, str]]:
-    """
-    Extract sections from text, including preamble.
-    Section pattern: "Section <number> - <title>"
-    If no section headings found, entire text is Document Preamble.
-    """
-    section_pattern = re.compile(
-        r'(Section\s+\d+(?:\.\d+)?\s*[-:]\s*[A-Za-z0-9 ,&/().]+)',  # e.g., Section 1 - Payment Terms
-        flags=re.IGNORECASE
-    )
-
-    matches = list(section_pattern.finditer(text))
     sections = []
+    current_heading = "Document Preamble"
+    current_content = []
 
-    if not matches:
-        return [{"section_title": "Document Preamble", "content": text.strip()}]
+    # Detect heading threshold: find avg font size
+    font_sizes = [float(w["size"]) for w in all_elements]
+    avg_font_size = sum(font_sizes) / len(font_sizes)
+    heading_threshold = avg_font_size + 1  # anything bigger than avg is considered heading
 
-    # Preamble: everything before first section
-    first_start = matches[0].start()
-    preamble = text[:first_start].strip()
-    if preamble:
-        sections.append({"section_title": "Document Preamble", "content": preamble})
+    for word in all_elements:
+        text = word["text"].strip()
+        font_size = float(word["size"])
+        
+        if font_size >= heading_threshold or text.isupper():
+            # Save previous section
+            if current_content:
+                sections.append({
+                    "Heading": current_heading,
+                    "Paragraph": " ".join(current_content).strip()
+                })
+                current_content = []
+            current_heading = text  # new heading
+        else:
+            current_content.append(text)
 
-    # Each section
-    for i, match in enumerate(matches):
-        title = match.group(1).strip()
-        start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        content = text[start:end].strip()
-        sections.append({"section_title": title, "content": content})
+    # Add last section
+    if current_content:
+        sections.append({
+            "Heading": current_heading,
+            "Paragraph": " ".join(current_content).strip()
+        })
 
-    return sections
-
-
-# ---------- STEP 4: Save to CSV ----------
-def save_sections_to_csv(sections: List[Dict[str, str]], output_path: str):
-    """Save section data into a CSV file."""
+    # Save to CSV
     df = pd.DataFrame(sections)
-    df.to_csv(output_path, index=False)
-    print(f"✅ Saved {len(df)} sections to {output_path}")
+    df.to_csv(output_csv, index=False)
+    print(f"✅ Extracted {len(sections)} sections into {output_csv}")
 
-
-# ---------- Example Usage ----------
-if __name__ == "__main__":
-    pdf_file = "Old_MSA.pdf"  # Replace with your PDF path
-    output_csv = "document_sections.csv"
-
-    raw_text = load_pdf_text(pdf_file)
-    clean_text = normalize_text(raw_text)
-    extracted_sections = extract_sections(clean_text)
-    save_sections_to_csv(extracted_sections, output_csv)
-
-    print("\nExtracted Sections:")
-    for sec in extracted_sections:
-        print(f"\n{sec['section_title']}\n{sec['content'][:100]}...")
+# Example usage
+extract_sections_from_pdf("Old_MSA.pdf", "sections_extracted.csv")
