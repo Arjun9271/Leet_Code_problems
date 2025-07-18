@@ -1,111 +1,85 @@
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from difflib import SequenceMatcher
-def extract_text_from_pdf(pdf_path: str) -> str:
+import json
+
+
+# ---------------------------
+# 1. Extract text by page
+# ---------------------------
+def extract_pages(pdf_path: str, min_len: int = 50):
+    """
+    Extract pages with their page number and text.
+    """
     loader = PyPDFLoader(pdf_path)
     pages = loader.load()
-    text = "\n".join([doc.page_content for doc in pages if doc.page_content and len(doc.page_content.strip()) > 50])
-    return text.strip()
+
+    page_texts = []
+    for doc in pages:
+        content = (doc.page_content or "").strip()
+        if content and len(content) > min_len:
+            page_texts.append({
+                "page": doc.metadata.get("page", None),
+                "text": content
+            })
+    return page_texts
 
 
-def load_and_chunk_pdf(pdf_path,chunk_size = 12000,chunk_overlap = 2000):
-    loader = PyPDFLoader(pdf_path)
-    pages = loader.load()
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size = chunk_size,
-        chunk_overlap = chunk_overlap,
-        separators = ['\n\n','\n','.',' ','']
-    )
-
-    chunks = splitter.split_documents(pages)
-    return chunks
-
-
-
-
-
-from difflib import SequenceMatcher
-
+# ---------------------------
+# 2. Diff two texts (word-based)
+# ---------------------------
 def get_diff_context(text1: str, text2: str) -> dict:
     words1 = text1.split()
     words2 = text2.split()
-    lower_words1 = [w.lower() for w in words1]
-    lower_words2 = [w.lower() for w in words2]
+    matcher = SequenceMatcher(None, [w.lower() for w in words1], [w.lower() for w in words2])
 
-    matcher = SequenceMatcher(None, lower_words1, lower_words2)
-
-    categorized_diff = {
-        "ADDED": [],
-        "REMOVED": [],
-        "MODIFIED": [],
-        "UNCHANGED": []
-    }
+    diff = {"ADDED": [], "REMOVED": [], "MODIFIED": [], "UNCHANGED": []}
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            categorized_diff["UNCHANGED"].append({
-                "text": ' '.join(words1[i1:i2])
-            })
+            diff["UNCHANGED"].append({"text": " ".join(words1[i1:i2])})
         elif tag == "insert":
-            categorized_diff["ADDED"].append({
-                "text": ' '.join(words2[j1:j2])
-            })
+            diff["ADDED"].append({"text": " ".join(words2[j1:j2])})
         elif tag == "delete":
-            categorized_diff["REMOVED"].append({
-                "text": ' '.join(words1[i1:i2])
-            })
+            diff["REMOVED"].append({"text": " ".join(words1[i1:i2])})
         elif tag == "replace":
-            categorized_diff["MODIFIED"].append({
-                "old_text": ' '.join(words1[i1:i2]),
-                "new_text": ' '.join(words2[j1:j2])
+            diff["MODIFIED"].append({
+                "old_text": " ".join(words1[i1:i2]),
+                "new_text": " ".join(words2[j1:j2])
             })
-
-    return categorized_diff
-
+    return diff
 
 
+# ---------------------------
+# 3. Compare page by page
+# ---------------------------
+def compare_pdfs_pagewise(pdf1: str, pdf2: str):
+    pages1 = extract_pages(pdf1)
+    pages2 = extract_pages(pdf2)
+
+    max_len = max(len(pages1), len(pages2))
+    result = []
+
+    for i in range(max_len):
+        page_num = (pages2[i]["page"] if i < len(pages2) else pages1[i]["page"]) or (i + 1)
+        text1 = pages1[i]["text"] if i < len(pages1) else ""
+        text2 = pages2[i]["text"] if i < len(pages2) else ""
+
+        page_diff = get_diff_context(text1, text2)
+        result.append({
+            "page": page_num,
+            **page_diff
+        })
+
+    return result
 
 
+# ---------------------------
+# 4. Example usage
+# ---------------------------
+if __name__ == "__main__":
+    pdf_old = "old_version.pdf"
+    pdf_new = "new_version.pdf"
 
+    diff_result = compare_pdfs_pagewise(pdf_old, pdf_new)
 
-def format_diff_for_prompt(diff_dict: dict) -> str:
-    sections = []
-    for key, diffs in diff_dict.items():
-        if not diffs:
-            continue
-        section_lines = [f"{key}:"]
-        for item in diffs:
-            if key == "MODIFIED":
-                section_lines.append(f"- From: {item['old_text']}\n  To:   {item['new_text']}")
-            elif key in ["ADDED", "REMOVED", "UNCHANGED"]:
-                section_lines.append(f"- {item['text']}")
-            else:
-                section_lines.append(f"- {item}")
-        sections.append('\n'.join(section_lines))
-    return '\n\n'.join(sections)
-
-
-
-def extract_diff_pairs_by_type(diff_dict: dict) -> dict:
-    categorized_pairs = {
-        "ADDED": [],
-        "REMOVED": [],
-        "MODIFIED": [],
-        "UNCHANGED": []
-    }
-
-    for key, items in diff_dict.items():
-        for item in items:
-            if key == "MODIFIED":
-                categorized_pairs["MODIFIED"].append({
-                    "from": item["old_text"],
-                    "to": item["new_text"]
-                })
-            else:
-                categorized_pairs[key].append({
-                    "text": item["text"]
-                })
-
-    return categorized_pairs
-
+    print(json.dumps(diff_result, indent=2))
