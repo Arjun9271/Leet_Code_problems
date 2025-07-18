@@ -1,153 +1,80 @@
-# app.py
-import os
-import json
-import streamlit as st
-from pathlib import Path
-from tempfile import mkdtemp
-import matplotlib.pyplot as plt
-from dotenv import load_dotenv
-from PIL import ImageDraw
-from PyPDF2 import PdfReader
+import pdfplumber
+import re
+import pandas as pd
+from typing import List, Dict
 
-from langchain_core.prompts import PromptTemplate
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_docling import DoclingLoader
-from langchain_huggingface import HuggingFaceEndpoint
-from langchain_huggingface.embeddings import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
 
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.chunking import HybridChunker, DocMeta
-from docling.datamodel.document import DoclingDocument
+# ---------- STEP 1: Load PDF and extract text ----------
+def load_pdf_text(file_path: str) -> str:
+    """Extract text from a PDF file using pdfplumber."""
+    text = ""
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() + "\n"
+    return text.strip()
 
-# Init
-st.set_page_config(layout="wide")
-load_dotenv()
-HF_TOKEN = os.getenv("HF_TOKEN")
-EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
-GEN_MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
-TOP_K = 3
 
-st.title("📚 PDF Q&A with Visual Grounding")
+# ---------- STEP 2: Normalize PDF text ----------
+def normalize_text(text: str) -> str:
+    """Clean up extracted text for easier parsing."""
+    text = text.replace("–", "-").replace("—", "-")  # normalize dashes
+    text = re.sub(r'[ \t]+', ' ', text)  # collapse extra spaces
+    return text.strip()
 
-# Sidebar: PDF Upload
-st.sidebar.header("📤 Upload PDF")
-uploaded_file = st.sidebar.file_uploader("Upload a PDF", type="pdf")
 
-if uploaded_file:
-    temp_pdf_path = Path("uploaded.pdf")
-    with open(temp_pdf_path, "wb") as f:
-        f.write(uploaded_file.read())
-
-    # Convert PDF to Docling
-    st.info("Processing PDF...")
-    converter = DocumentConverter(format_options={
-        InputFormat.PDF: PdfFormatOption(
-            pipeline_options=PdfPipelineOptions(
-                generate_page_images=True,
-                images_scale=2.0,
-            )
-        )
-    })
-    dl_doc = converter.convert(str(temp_pdf_path)).document
-    doc_store = {}
-    file_path = Path(mkdtemp()) / f"{dl_doc.origin.binary_hash}.json"
-    dl_doc.save_as_json(file_path)
-    doc_store[dl_doc.origin.binary_hash] = file_path
-
-    # Chunk and embed
-    loader = DoclingLoader(
-        file_path=[str(temp_pdf_path)],
-        converter=converter,
-        export_type="doc_chunks",
-        chunker=HybridChunker(tokenizer=EMBED_MODEL_ID),
-    )
-    docs = loader.load()
-
-    embedding = HuggingFaceEmbeddings(model_name=EMBED_MODEL_ID)
-    vectorstore = Milvus.from_documents(
-        documents=docs,
-        embedding=embedding,
-        collection_name="docling_demo",
-        connection_args={"uri": str(Path(mkdtemp()) / "docling.db")},
-        index_params={"index_type": "FLAT"},
-        drop_old=True,
+# ---------- STEP 3: Extract sections ----------
+def extract_sections(text: str) -> List[Dict[str, str]]:
+    """
+    Extract sections from text, including preamble.
+    Section pattern: "Section <number> - <title>"
+    If no section headings found, entire text is Document Preamble.
+    """
+    section_pattern = re.compile(
+        r'(Section\s+\d+(?:\.\d+)?\s*[-:]\s*[A-Za-z0-9 ,&/().]+)',  # e.g., Section 1 - Payment Terms
+        flags=re.IGNORECASE
     )
 
-    # QA + Visual Answer
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
-    prompt = PromptTemplate.from_template(
-        "Context information is below.\n---------------------\n{context}\n---------------------\nGiven the context information and not prior knowledge, answer the query.\nQuery: {input}\nAnswer:\n"
-    )
-    llm = HuggingFaceEndpoint(repo_id=GEN_MODEL_ID, huggingfacehub_api_token=HF_TOKEN)
-    rag_chain = create_retrieval_chain(retriever, create_stuff_documents_chain(llm, prompt))
+    matches = list(section_pattern.finditer(text))
+    sections = []
 
-    # Q&A section
-    col1, col2 = st.columns([1, 1.2])
-    with col1:
-        st.subheader("❓ Ask a Question")
-        user_question = st.text_input("Enter your question")
+    if not matches:
+        return [{"section_title": "Document Preamble", "content": text.strip()}]
 
-        if st.button("Submit") and user_question:
-            with st.spinner("💬 Generating answer..."):
-                resp_dict = rag_chain.invoke({"input": user_question})
-                st.markdown(f"**Answer:** {resp_dict['answer']}")
+    # Preamble: everything before first section
+    first_start = matches[0].start()
+    preamble = text[:first_start].strip()
+    if preamble:
+        sections.append({"section_title": "Document Preamble", "content": preamble})
 
-                # Create image highlights
-                visual_dir = Path("visuals")
-                visual_dir.mkdir(exist_ok=True)
+    # Each section
+    for i, match in enumerate(matches):
+        title = match.group(1).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        content = text[start:end].strip()
+        sections.append({"section_title": title, "content": content})
 
-                image_paths = []
-                for i, doc in enumerate(resp_dict["context"]):
-                    meta = DocMeta.model_validate(doc.metadata["dl_meta"])
-                    dl_doc = DoclingDocument.load_from_json(doc_store[meta.origin.binary_hash])
-                    image_by_page = {}
+    return sections
 
-                    for doc_item in meta.doc_items:
-                        if doc_item.prov:
-                            prov = doc_item.prov[0]
-                            page_no = prov.page_no
-                            img = image_by_page.get(page_no)
-                            if not img:
-                                img = dl_doc.pages[page_no].image.pil_image
-                                image_by_page[page_no] = img
 
-                            bbox = prov.bbox.to_top_left_origin(dl_doc.pages[page_no].size.height).normalized(dl_doc.pages[page_no].size)
-                            thickness = 2
-                            padding = 2
-                            bbox.l = round(bbox.l * img.width - padding)
-                            bbox.r = round(bbox.r * img.width + padding)
-                            bbox.t = round(bbox.t * img.height - padding)
-                            bbox.b = round(bbox.b * img.height + padding)
+# ---------- STEP 4: Save to CSV ----------
+def save_sections_to_csv(sections: List[Dict[str, str]], output_path: str):
+    """Save section data into a CSV file."""
+    df = pd.DataFrame(sections)
+    df.to_csv(output_path, index=False)
+    print(f"✅ Saved {len(df)} sections to {output_path}")
 
-                            draw = ImageDraw.Draw(img)
-                            draw.rectangle(bbox.as_tuple(), outline="blue", width=thickness)
 
-                    for page_no, img in image_by_page.items():
-                        vis_path = visual_dir / f"vis_{i}_{page_no}.png"
-                        img.save(vis_path)
-                        image_paths.append(vis_path)
+# ---------- Example Usage ----------
+if __name__ == "__main__":
+    pdf_file = "Old_MSA.pdf"  # Replace with your PDF path
+    output_csv = "document_sections.csv"
 
-                st.session_state["images"] = image_paths
-                st.session_state["img_index"] = 0
+    raw_text = load_pdf_text(pdf_file)
+    clean_text = normalize_text(raw_text)
+    extracted_sections = extract_sections(clean_text)
+    save_sections_to_csv(extracted_sections, output_csv)
 
-    # Right side: Visual grounding
-    with col2:
-        st.subheader("🖼️ Visual Answer")
-        images = st.session_state.get("images", [])
-        if images:
-            index = st.session_state.get("img_index", 0)
-            st.image(images[index], use_column_width=True)
-
-            colA, colB = st.columns(2)
-            if colA.button("⬅️ Previous"):
-                if index > 0:
-                    st.session_state["img_index"] = index - 1
-            if colB.button("➡️ Next"):
-                if index < len(images) - 1:
-                    st.session_state["img_index"] = index + 1
-        else:
-            st.info("Answer image will appear here after asking a question.")
+    print("\nExtracted Sections:")
+    for sec in extracted_sections:
+        print(f"\n{sec['section_title']}\n{sec['content'][:100]}...")
